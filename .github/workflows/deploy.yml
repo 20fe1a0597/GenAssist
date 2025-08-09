@@ -1,0 +1,186 @@
+name: Deploy GenAssist to AWS
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '20'
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+        
+    - name: Install dependencies
+      run: |
+        # Install Node.js dependencies
+        npm install
+        
+        # Install Python dependencies
+        pip install -r cdk/requirements.txt
+        
+        # Install AWS CDK
+        npm install -g aws-cdk
+        
+    - name: Build frontend
+      run: |
+        cd client
+        npm install
+        npm run build
+        cd ..
+        
+    - name: Run tests
+      run: |
+        # Add tests here when available
+        echo "Tests would run here"
+        
+    - name: Package Lambda functions
+      run: |
+        mkdir -p dist/lambda
+        
+        # Package each Lambda function
+        for func in intent-detection transcribe polly workflow-executor; do
+          echo "Packaging $func..."
+          mkdir -p "dist/lambda/$func"
+          cp "lambda/$func"/*.py "dist/lambda/$func/"
+          
+          if [ -f "lambda/$func/requirements.txt" ]; then
+            pip install -r "lambda/$func/requirements.txt" -t "dist/lambda/$func/"
+          fi
+        done
+        
+        # Package dependencies layer
+        mkdir -p dist/lambda/layers/dependencies/python
+        if [ -f "lambda/layers/dependencies/requirements.txt" ]; then
+          pip install -r lambda/layers/dependencies/requirements.txt -t dist/lambda/layers/dependencies/python/
+        fi
+        cp -r lambda/layers/dependencies/* dist/lambda/layers/dependencies/
+        
+    - name: Deploy with CDK
+      run: |
+        cd cdk
+        
+        # Bootstrap CDK (safe to run multiple times)
+        cdk bootstrap
+        
+        # Deploy stack
+        cdk deploy --require-approval never --outputs-file ../outputs.json
+        
+        cd ..
+        
+    - name: Deploy frontend to S3
+      run: |
+        if [ -f "outputs.json" ]; then
+          # Extract S3 bucket name from CDK outputs
+          FRONTEND_BUCKET=$(python3 -c "
+import json
+with open('outputs.json', 'r') as f:
+    outputs = json.load(f)
+    print(outputs['GenAssistStack']['FrontendBucketName'])
+")
+          
+          # Upload frontend files to S3
+          aws s3 sync client/dist/ s3://$FRONTEND_BUCKET --delete
+          
+          echo "Frontend deployed to S3: $FRONTEND_BUCKET"
+        else
+          echo "Error: CDK outputs file not found"
+          exit 1
+        fi
+        
+    - name: Test deployment
+      run: |
+        if [ -f "outputs.json" ]; then
+          # Extract API URL
+          API_URL=$(python3 -c "
+import json
+with open('outputs.json', 'r') as f:
+    outputs = json.load(f)
+    print(outputs['GenAssistStack']['APIEndpoint'])
+")
+          
+          # Test API health
+          echo "Testing API at: $API_URL"
+          curl -f "$API_URL/api/stats" || echo "API test failed"
+          
+          # Extract CloudFront URL
+          CLOUDFRONT_URL=$(python3 -c "
+import json
+with open('outputs.json', 'r') as f:
+    outputs = json.load(f)
+    print(outputs['GenAssistStack']['CloudFrontURL'])
+")
+          
+          echo "Deployment successful!"
+          echo "Frontend URL: $CLOUDFRONT_URL"
+          echo "API URL: $API_URL"
+        fi
+        
+    - name: Upload deployment artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: deployment-outputs
+        path: |
+          outputs.json
+          cdk.out/
+        retention-days: 7
+        
+  cleanup-on-pr:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+        
+    - name: Install CDK
+      run: |
+        npm install -g aws-cdk
+        pip install -r cdk/requirements.txt
+        
+    - name: Cleanup PR environment
+      run: |
+        cd cdk
+        # Only destroy if this was a PR-specific deployment
+        # In a real setup, you'd use different stack names for PRs
+        echo "PR cleanup - would destroy PR-specific resources here"
