@@ -1,0 +1,238 @@
+an end-to-end GenAssist application with:
+
+React frontend
+
+FastAPI backend (Python)
+
+Amazon Bedrock integration for LLM intent detection
+
+AWS CDK for full infrastructure automation (API Gateway, Lambda, Bedrock access, DynamoDB, S3, Cognito)
+
+n8n integration for email workflows via SES
+
+Production-ready deployment setup
+
+markdown
+Copy
+Edit
+# Build Full-Stack "GenAssist" — AWS Bedrock Multi-Domain Workflow Automation App
+
+You are an expert full-stack AWS developer.  
+Generate a **complete production-ready application** with:
+
+---
+
+## 1️⃣ Project Overview
+
+**App Name:** GenAssist: Multi-Domain Workflow Automation Powered by AWS Bedrock  
+**Purpose:** Allow employees to trigger business workflows via voice or text commands.  
+**Example Workflows:**  
+- HR onboarding  
+- IT ticket creation  
+- Expense approval  
+- Meeting scheduling  
+
+---
+
+## 2️⃣ Architecture Requirements
+
+- **Frontend:** React (Vite or CRA), Tailwind CSS, Axios for API calls
+- **Backend:** FastAPI (Python 3.11), Pydantic models, async endpoints
+- **Workflow Engine:** Multi-intent handler calling AWS Bedrock
+- **Database:** DynamoDB for workflow/task records
+- **Auth:** AWS Cognito for user authentication
+- **Voice Input:** AWS Transcribe for speech-to-text
+- **Notifications:** n8n workflow for SES-based email sending
+- **Infra as Code:** AWS CDK (Python) to deploy:
+  - API Gateway
+  - Lambda functions for backend
+  - Bedrock model permissions
+  - S3 bucket for static frontend hosting
+  - DynamoDB tables
+  - Cognito User Pool + Identity Pool
+  - IAM roles/policies for Bedrock, Transcribe, SES
+  - CloudWatch logging
+- **Deployment:** GitHub Actions for CI/CD (build → test → deploy)
+
+---
+
+## 3️⃣ Functional Flow
+
+1. User logs in via Cognito (React frontend → Cognito hosted UI).
+2. User speaks or types a command (e.g., *"Onboard Priya Singh as Developer on Aug 15"*).
+3. If voice: Audio sent to API → AWS Transcribe → text returned.
+4. Text sent to Bedrock (Claude or Titan) → extract `intent` + `entities`.
+5. FastAPI matches intent to workflow handler (HR, IT, Finance).
+6. For HR onboarding example:
+   - Create record in DynamoDB
+   - Trigger n8n webhook to send welcome email (SES)
+   - Log activity in CloudWatch
+7. Respond to frontend with status & confirmation.
+
+---
+
+## 4️⃣ File Structure
+
+genassist/
+│── frontend/ (React app)
+│ ├── src/
+│ │ ├── App.jsx
+│ │ ├── components/
+│ │ ├── pages/
+│ │ ├── services/api.js
+│ │ └── styles/
+│── backend/ (FastAPI)
+│ ├── main.py
+│ ├── models.py
+│ ├── workflows/
+│ │ ├── hr.py
+│ │ ├── it.py
+│ │ ├── finance.py
+│ ├── services/
+│ │ ├── bedrock_client.py
+│ │ ├── transcribe_client.py
+│ │ ├── n8n_client.py
+│ │ └── dynamo_client.py
+│── cdk/ (AWS CDK IaC)
+│ ├── app.py
+│ ├── stacks/
+│ │ ├── genassist_stack.py
+│ │ ├── init.py
+│── .github/workflows/
+│ ├── ci-cd.yml
+
+python
+Copy
+Edit
+
+---
+
+## 5️⃣ AWS CDK Python Stack Example
+
+```python
+# cdk/stacks/genassist_stack.py
+from aws_cdk import (
+    aws_s3 as s3,
+    aws_lambda as _lambda,
+    aws_apigateway as apigw,
+    aws_dynamodb as dynamodb,
+    aws_cognito as cognito,
+    aws_iam as iam,
+    core
+)
+
+class GenAssistStack(core.Stack):
+    def __init__(self, scope: core.Construct, id: str, **kwargs):
+        super().__init__(scope, id, **kwargs)
+
+        # S3 for frontend hosting
+        site_bucket = s3.Bucket(self, "GenAssistSiteBucket", public_read_access=True)
+
+        # DynamoDB table
+        table = dynamodb.Table(
+            self, "WorkflowsTable",
+            partition_key={"name": "id", "type": dynamodb.AttributeType.STRING}
+        )
+
+        # Cognito User Pool
+        user_pool = cognito.UserPool(self, "GenAssistUserPool")
+        user_pool_client = user_pool.add_client("AppClient")
+
+        # Lambda backend
+        backend_lambda = _lambda.Function(
+            self, "BackendLambda",
+            runtime=_lambda.Runtime.PYTHON_3_11,
+            handler="main.handler",
+            code=_lambda.Code.from_asset("../backend"),
+            environment={
+                "TABLE_NAME": table.table_name,
+                "USER_POOL_ID": user_pool.user_pool_id
+            },
+            memory_size=512,
+            timeout=core.Duration.seconds(30)
+        )
+
+        # API Gateway
+        api = apigw.LambdaRestApi(self, "GenAssistAPI", handler=backend_lambda)
+
+        # Permissions
+        table.grant_read_write_data(backend_lambda)
+        backend_lambda.add_to_role_policy(iam.PolicyStatement(
+            actions=["bedrock:*", "transcribe:*", "ses:*"],
+            resources=["*"]
+        ))
+6️⃣ Backend — FastAPI Example
+python
+Copy
+Edit
+# backend/main.py
+from fastapi import FastAPI
+from models import WorkflowRequest
+from services import bedrock_client, n8n_client, dynamo_client
+
+app = FastAPI()
+
+@app.post("/process")
+async def process_workflow(req: WorkflowRequest):
+    intent, entities = bedrock_client.extract_intent_entities(req.text)
+    if intent == "HR_Onboarding":
+        dynamo_client.create_record(entities)
+        n8n_client.trigger_email_workflow(entities["employee_name"], entities["role"])
+        return {"status": "HR onboarding triggered"}
+    elif intent == "Raise_Incident":
+        dynamo_client.create_record(entities)
+        n8n_client.trigger_incident_email(entities["issue"])
+        return {"status": "Incident logged"}
+    return {"status": "No matching workflow"}
+7️⃣ Frontend — React Example
+jsx
+Copy
+Edit
+// frontend/src/App.jsx
+import { useState } from "react";
+import api from "./services/api";
+
+function App() {
+  const [input, setInput] = useState("");
+  const [response, setResponse] = useState("");
+
+  const handleSubmit = async () => {
+    const res = await api.post("/process", { text: input });
+    setResponse(res.data.status);
+  };
+
+  return (
+    <div className="p-4">
+      <h1 className="text-3xl">GenAssist</h1>
+      <textarea value={input} onChange={(e) => setInput(e.target.value)} />
+      <button onClick={handleSubmit}>Run Workflow</button>
+      <p>{response}</p>
+    </div>
+  );
+}
+
+export default App;
+8️⃣ n8n Workflow
+Create a webhook in n8n → connect to SES → send email
+
+In FastAPI, n8n_client.py calls the webhook URL with workflow data
+
+9️⃣ CI/CD
+GitHub Actions workflow:
+
+Build React → upload to S3
+
+Deploy backend via AWS CDK
+
+Run tests before deploy
+
+10️⃣ Deliverables
+✅ Full React frontend
+✅ FastAPI backend with Bedrock integration
+✅ AWS CDK IaC
+✅ n8n email automation
+✅ Cognito authentication
+✅ DynamoDB persistence
+✅ Production-ready CI/CD
+
+Generate all code files with working examples.
